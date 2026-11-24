@@ -17,6 +17,8 @@ services:
 
   # Public HTTPS without opening a router port. Create the tunnel in the Cloudflare dashboard,
   # route kitchen.<your-domain> to http://kitchen:8000 and paste its token into .env.
+  # (An existing cloudflared on the host can instead route to http://127.0.0.1:${KITCHEN_HOST_PORT}.)
+  # Connector URL for ChatGPT / claude.ai: https://kitchen.<your-domain>/<KITCHEN_TOKEN>/mcp, "No authentication".
   cloudflared:
     image: cloudflare/cloudflared:latest
     restart: unless-stopped

@@ -22,6 +22,8 @@ GUIDE = """Kurzleitfaden für den Agenten:
 - Einkauf, Kochen, Vorrat bucht der Server direkt: record_purchase ("alles außer Feta"), record_cooking, update_pantry. Bei Fehlern: undo_last_action.
 - Rechne nie selbst Mengen, Preise oder Nährwerte aus; nutze die Zahlen aus den Antworten. Schätzpreise als "ca." nennen.
 - Allergien und Ausschlüsse prüft der Server; nenne Warnungen aus warnings immer.
+- Haushaltsartikel (Klopapier, Spülmittel, Zahnpasta …) laufen über dieselben Tools. Der Server lernt, wie lange sie halten, und
+  setzt sie selbst auf die Liste. "… ist alle/fast leer" → update_pantry level; "hab noch" bei einem Listenposten → von der Liste streichen.
 - Antworte kurz, im Ton eines hilfsbereiten Mitbewohners, auf Deutsch, außer der Nutzer schreibt anders."""
 
 
@@ -69,6 +71,10 @@ class StatusMixin(CookingMixin):
                     expiring.append({"name": ing["name"], "qty": fmt_qty(lot["qty"] - lot["reserved"], ing["base_unit"]),
                                      "until": self.day_label(bb), "expired": bb < today})
             low = [self.catalog.get(l["ingredient_id"])["name"] for l in self.lots() if l["staple_level"] in ("low", "empty")]
+            restock = self.restock_preview()
+            if restock:
+                next_actions.append(action("update_shopping_list", "Bald Nötiges auf die Liste setzen (kurz bestätigen lassen)",
+                                           {"add": [r["name"] for r in restock]}))
             if expiring:
                 next_actions.append(action("find_recipes", "Ideen für bald Ablaufendes anbieten",
                                            {"ingredients": [e["name"] for e in expiring if not e["expired"]][:5], "use_expiring": True}))
@@ -93,10 +99,12 @@ class StatusMixin(CookingMixin):
                 parts.append(f"bald fällig: {', '.join(e['name'] for e in expiring[:4])}")
             if leftovers:
                 parts.append(f"Reste: {', '.join(l['name'] for l in leftovers[:3])}")
+            if restock:
+                parts.append(f"nachkaufen: {', '.join(r['name'] for r in restock[:5])}")
             summary = "; ".join(parts) if parts else ("Neu hier – noch kein Plan und kein Vorrat." if onboarding else "Nichts geplant.")
             return envelope(summary, {
                 "today": today.isoformat(), "weekday": self.day_label(today), "upcoming_meals": upcoming, "shopping": shopping,
-                "expiring_soon": expiring, "leftovers": leftovers, "staples_low": low, "pending_proposal": pending,
+                "expiring_soon": expiring, "leftovers": leftovers, "staples_low": low, "restock_due": restock, "pending_proposal": pending,
                 "household": self.household_overview() if not onboarding else None,
                 "offers": {"active": active, "fetched_at": fetched.isoformat() if fetched else None},
                 "guide": GUIDE,

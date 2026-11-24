@@ -2,7 +2,8 @@
 
 An MCP server that turns Claude (or ChatGPT/Gemini) into a kitchen assistant: it plans meals, builds the
 shopping list from current supermarket offers, tracks the pantry with best-before dates, books purchases and
-cooking, plans leftovers, and enforces allergies. You only talk to your agent; the server does every
+cooking, plans leftovers, enforces allergies, and keeps household supplies (toilet paper, dish soap, toothpaste …)
+stocked on a learned rhythm. You only talk to your agent; the server does every
 calculation and tells the agent what to do next.
 
 Design: the specification “Kitchen Agent – Systemdesign”; decisions and deviations in
@@ -21,6 +22,8 @@ Talk normally. Examples:
 | „Curry gekocht, zwei Portionen übrig“ | Ingredients deducted, leftovers stored and planned next |
 | „Samstag essen wir auswärts“ | Meal skipped, reserved food freed, unneeded items taken off the list |
 | „Was muss bald weg?“ / „Hähnchen eingefroren“ | Pantry by expiry / moved to the freezer with a new date |
+| „Klopapier ist fast alle“, „Zahnpasta hab ich mitgenommen“ | Household supplies: on the list right away / restock rhythm learned |
+| „Wie lange reicht das Spülmittel noch?“ | Estimated from how fast you use it; due supplies join the next shopping trip by themselves |
 | „Ich vertrage keine Laktose“, „kein Aldi mehr“ | Saved as hard rules / store preferences |
 | „Mach das rückgängig“ | Last change undone |
 
@@ -50,13 +53,16 @@ KITCHEN_TOKEN=… .venv/bin/python -m kitchen.server --transport http --host 0.0
 
 - Container (Raspberry Pi or any host): `docker compose up -d` or `podman compose up -d` (`.env` with `KITCHEN_TOKEN`;
   `KITCHEN_HOST_PORT` if 8000 is taken; `--profile tunnel` plus `TUNNEL_TOKEN` for Cloudflare).
+- Public access via cloudflared: route a hostname to the container's port 8000. ChatGPT and claude.ai connectors only
+  offer OAuth or no authentication, so add the connector with URL `https://<host>/<KITCHEN_TOKEN>/mcp` and
+  "No authentication"; the secret in the path is the key. Clients that can send headers may use `Authorization: Bearer`.
 
 ## Tests
 
 End-to-end only.
 
 ```bash
-mise run test         # 21 scenarios over MCP against the real server process (stdio + HTTP), pinned to a fixture week
+mise run test         # 24 scenarios over MCP against the real server process (stdio + HTTP), pinned to a fixture week
 mise run test:agent   # Claude itself plays a week from plain German sentences; transcript in tests/agent/last-run.md
 ```
 

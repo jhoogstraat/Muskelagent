@@ -144,6 +144,23 @@ def main() -> int:
     _, calls = run.say("Was sollte ich heute kochen, und muss irgendwas bald weg?", "2026-07-28", 17)
     run.check("Status oder Vorrat abgefragt", lambda: {"get_kitchen_status", "get_pantry"} & set(tools(calls)))
 
+    supply = "SELECT s.* FROM supply_state s JOIN ingredient i ON i.id = s.id WHERE i.name = ?"
+    on_list = ("SELECT 1 FROM shopping_item s JOIN ingredient i ON i.id = s.ingredient_id "
+               "WHERE s.status = 'open' AND i.name = ?")
+    _, calls = run.say("Übrigens: Klopapier und Spülmittel sind fast alle. Und Zahnpasta hab ich heute noch mitgenommen.",
+                       "2026-07-28", 20)
+    run.check("Klopapier und Spülmittel als knapp/leer gebucht",
+              lambda: all(r and r[0]["level"] in ("low", "empty") for r in (run.q(supply, "Toilettenpapier"), run.q(supply, "Spülmittel"))))
+    run.check("Klopapier und Spülmittel stehen auf der Einkaufsliste",
+              lambda: run.q(on_list, "Toilettenpapier") and run.q(on_list, "Spülmittel"))
+    run.check("Zahnpasta als gekauft gebucht", lambda: (r := run.q(supply, "Zahnpasta")) and r[0]["last_bought_on"] == "2026-07-28")
+    run.check("Keine Haushaltsartikel als Lebensmittel angelegt",
+              lambda: not run.q("SELECT 1 FROM ingredient WHERE is_builtin = 0 AND is_supply = 0 AND name NOT IN ('Reste')"))
+
+    answer, calls = run.say("Wie lange reicht eigentlich noch meine Zahnpasta?", "2026-08-10", 9)
+    run.check("Vorrat oder Status für Reichweite abgefragt", lambda: {"get_kitchen_status", "get_pantry"} & set(tools(calls)))
+    run.check("Antwort nennt eine Reichweite", lambda: any(ch.isdigit() for ch in answer) or "bald" in answer.lower())
+
     passed = sum(1 for _, ok, _ in run.results if ok)
     report = ROOT / "tests" / "agent" / "last-run.md"
     report.write_text(f"# Agent-E2E ({args.model}) – {passed}/{len(run.results)} Checks bestanden\n\n" + "\n".join(run.transcript),

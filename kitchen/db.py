@@ -12,14 +12,14 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 # Tables whose changes are recorded for undo. Every one has a TEXT/INTEGER primary key `id`.
 TRACKED_TABLES = (
     "household", "member", "restriction", "nutrition_target", "preference", "store",
     "ingredient", "lot", "reservation", "recipe", "recipe_ingredient", "recipe_rating",
     "meal_plan", "meal_slot", "shopping_trip", "shopping_item", "purchase", "purchase_line",
-    "price_observation", "cook_log",
+    "price_observation", "cook_log", "supply_state",
 )
 
 SCHEMA = """
@@ -240,12 +240,38 @@ def connect(path: Path) -> sqlite3.Connection:
     return conn
 
 
+# Schema changes after version 1, applied in order. SCHEMA above is the version-1 baseline.
+MIGRATIONS: dict[int, str] = {
+    2: """
+    -- Household supplies (non-food that needs restocking): counted in packs, no best-before, learned restock interval.
+    ALTER TABLE ingredient ADD COLUMN is_supply INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE ingredient ADD COLUMN restock_days REAL;
+    ALTER TABLE ingredient ADD COLUMN restock_per_person INTEGER NOT NULL DEFAULT 1;
+    ALTER TABLE shopping_item ADD COLUMN restock INTEGER NOT NULL DEFAULT 0;
+    CREATE TABLE IF NOT EXISTS supply_state (
+        id TEXT PRIMARY KEY REFERENCES ingredient(id),
+        last_bought_on TEXT, packs REAL NOT NULL DEFAULT 1,
+        days_per_pack REAL NOT NULL, days_source TEXT NOT NULL DEFAULT 'default',
+        level TEXT NOT NULL DEFAULT 'ok' CHECK (level IN ('ok','low','empty')), level_on TEXT,
+        snoozed_until TEXT, tracking INTEGER NOT NULL DEFAULT 1, updated_at TEXT NOT NULL
+    );
+    """,
+}
+
+
 def migrate(conn: sqlite3.Connection) -> None:
     version = conn.execute("PRAGMA user_version").fetchone()[0]
     if version >= SCHEMA_VERSION:
         return
-    conn.executescript(SCHEMA)
+    if version < 1:
+        conn.executescript(SCHEMA)
+        version = 1
+    for target in range(version + 1, SCHEMA_VERSION + 1):
+        conn.executescript(MIGRATIONS[target])
+    # Undo triggers snapshot a table's columns, so they are rebuilt whenever columns change.
     for table in TRACKED_TABLES:
+        for op in "iud":
+            conn.execute(f"DROP TRIGGER IF EXISTS {table}_log_{op}")
         _install_change_triggers(conn, table)
     now = utc_now()
     conn.execute("INSERT OR IGNORE INTO household (id, created_at, updated_at) VALUES (1, ?, ?)", (now, now))

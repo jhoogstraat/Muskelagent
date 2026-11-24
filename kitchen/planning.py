@@ -221,7 +221,10 @@ class PlanningMixin(RecipeMixin):
                 summary += f", Einkauf {self.day_label(first['date'])} bei {', '.join(t['store'] for t in trips if t['date'] == first['date'])}"
             if replaced:
                 summary += " (Änderungen übernommen)"
-            return envelope(summary + ".", {"plan_id": plan["id"], "period": proposal["period"], "shopping_trips": [
+            restocked = self._sync_restock()  # type: ignore[attr-defined]
+            if restocked:
+                summary += f". Dazu auf die Liste, weil bald nötig: {', '.join(restocked)}"
+            return envelope(summary + ".", {"plan_id": plan["id"], "period": proposal["period"], "restock_added": restocked, "shopping_trips": [
                 {"date": t["date"], "store": t["store"], "items": len(t["items"]), "total": t["total"]} for t in trips]},
                 warnings=warnings + proposal.get("warnings", []),
                 next_actions=[action("get_shopping_list", "Wenn der Nutzer die Einkaufsliste sehen will"),
@@ -259,7 +262,7 @@ class PlanningMixin(RecipeMixin):
         remaining = self.conn.execute("SELECT count(*) FROM meal_slot WHERE plan_id = ? AND status = 'planned'", (plan_id,)).fetchone()[0]
         changed = bool(slots)
         for trip in [r["id"] for r in self.conn.execute("SELECT id FROM shopping_trip WHERE plan_id = ? AND status = 'planned'", (plan_id,))]:
-            for item in self.conn.execute("SELECT * FROM shopping_item WHERE trip_id = ? AND status = 'open' AND is_manual = 0", (trip,)).fetchall():
+            for item in self.conn.execute("SELECT * FROM shopping_item WHERE trip_id = ? AND status = 'open' AND is_manual = 0 AND restock = 0", (trip,)).fetchall():
                 needed = self.conn.execute("SELECT count(*) FROM reservation WHERE shopping_item_id = ? AND status = 'active'",
                                            (item["id"],)).fetchone()[0]
                 if needed or (item["check_at_home"] and remaining and not own):

@@ -94,7 +94,41 @@ def variants(q: str) -> list[str]:
 
 
 def load_seed(conn: sqlite3.Connection) -> int:
-    if conn.execute("SELECT 1 FROM ingredient WHERE is_builtin = 1 LIMIT 1").fetchone():
+    return _load_food(conn) + _load_supplies(conn)
+
+
+def _load_supplies(conn: sqlite3.Connection) -> int:
+    """Household supplies; also added to existing databases, and turns same-named user items into supplies."""
+    from .supplies_seed import SUPPLIES, SUPPLY_SECTION
+    stamp = f"{len(SUPPLIES)}:{sum(len(s['synonyms']) for s in SUPPLIES)}"
+    if (conn.execute("SELECT value FROM meta WHERE key = 'supply_seed'").fetchone() or [None])[0] == stamp:
+        return 0
+    now = utc_now()
+    for item in SUPPLIES:
+        values = {"synonyms": jdumps(item["synonyms"]), "category": item["category"], "section": SUPPLY_SECTION,
+                  "price_cents": item["price_cents"], "restock_days": item["restock_days"],
+                  "restock_per_person": int(item["per_person"])}
+        conn.execute(
+            "INSERT OR IGNORE INTO ingredient (id, name, base_unit, pack_qty, storage, allergens, animal, is_supply, is_builtin, "
+            f"details_known, created_at, updated_at, {', '.join(values)}) VALUES (?, ?, 'pc', 1, 'pantry', '[]', NULL, 1, 1, 1, ?, ?, "
+            f"{', '.join('?' for _ in values)})", [new_id("ing"), item["name"], now, now, *values.values()])
+        conn.execute(
+            f"UPDATE ingredient SET is_supply = 1, details_known = 1, base_unit = 'pc', pack_qty = 1, allergens = '[]', animal = NULL, "
+            f"{', '.join(f'{k} = ?' for k in values)}, updated_at = ? WHERE name = ? COLLATE NOCASE",
+            [*values.values(), now, item["name"]])
+        # Items an agent created earlier under a synonym ("Klopapier" as a 'food') become supplies too.
+        labels = [label.casefold() for label in item["synonyms"]]
+        conn.execute(
+            "UPDATE ingredient SET is_supply = 1, details_known = 1, base_unit = 'pc', pack_qty = 1, allergens = '[]', animal = NULL, "
+            f"section = ?, category = coalesce(category, ?), restock_days = ?, restock_per_person = ?, updated_at = ? "
+            f"WHERE is_builtin = 0 AND is_supply = 0 AND lower(name) IN ({', '.join('?' for _ in labels)})",
+            [SUPPLY_SECTION, item["category"], item["restock_days"], int(item["per_person"]), now, *labels])
+    conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('supply_seed', ?)", (stamp,))
+    return len(SUPPLIES)
+
+
+def _load_food(conn: sqlite3.Connection) -> int:
+    if conn.execute("SELECT 1 FROM ingredient WHERE is_builtin = 1 AND is_supply = 0 LIMIT 1").fetchone():
         return 0
     try:
         from .catalog_seed import SEED
@@ -213,6 +247,8 @@ class Catalog:
     def create(self, name: str, details: dict[str, Any], kind_hint: str | None) -> dict[str, Any]:
         clean = " ".join(name.strip().split())
         clean = clean[0].upper() + clean[1:]
+        if details.get("non_food"):
+            return self._create_supply(clean, details)
         base = details.get("base_unit") or {"ml": "ml", "pc": "pc"}.get(kind_hint or "", "g")
         if base == "pc" and details.get("g_per_piece") is None and kind_hint == "pc":
             base = "pc"
@@ -236,6 +272,16 @@ class Catalog:
             f"VALUES (?, {', '.join('?' for _ in values)}, ?, ?, ?)",
             [ing_id] + list(values.values()) + [known, now, now],
         )
+        return self.get(ing_id)
+
+    def _create_supply(self, name: str, details: dict[str, Any]) -> dict[str, Any]:
+        now, ing_id = utc_now(), new_id("ing")
+        self.conn.execute(
+            "INSERT INTO ingredient (id, name, synonyms, category, section, base_unit, pack_qty, storage, allergens, price_cents, "
+            "is_supply, restock_days, restock_per_person, details_known, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, 'Drogerie & Sonstiges', 'pc', 1, 'pantry', '[]', ?, 1, ?, ?, 1, ?, ?)",
+            (ing_id, name, jdumps(details.get("synonyms") or []), details.get("category") or "Haushalt",
+             details.get("price_cents"), details.get("lasts_days") or 30, int(details.get("per_person", True)), now, now))
         return self.get(ing_id)
 
     def _fill_unknown(self, ing: dict[str, Any], details: dict[str, Any]) -> None:
@@ -289,6 +335,8 @@ def parse_restriction(kind: str, value: str) -> tuple[str, str]:
 
 def violations(ing: dict[str, Any], restrictions: list[dict[str, Any]]) -> list[str]:
     """Human-readable reasons why an ingredient breaks a hard rule."""
+    if ing.get("is_supply"):
+        return []
     reasons = []
     names = {norm(ing["name"]), *(norm(s) for s in ing.get("synonyms") or [])}
     category = norm(ing.get("category") or "")
@@ -314,4 +362,4 @@ def violations(ing: dict[str, Any], restrictions: list[dict[str, Any]]) -> list[
 
 
 def unknown_details(ing: dict[str, Any], restrictions: list[dict[str, Any]]) -> bool:
-    return bool(restrictions) and not ing["is_builtin"] and not ing["details_known"]
+    return bool(restrictions) and not ing["is_builtin"] and not ing["details_known"] and not ing.get("is_supply")

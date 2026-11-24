@@ -106,8 +106,10 @@ def http_server(db: Path, token: str, day: str = MONDAY):
 
 
 @contextlib.asynccontextmanager
-async def http_kitchen(base: str, token: str) -> AsyncIterator[Kitchen]:
-    transport = streamable_http_client(f"{base}/mcp", http_client=create_mcp_http_client(headers={"Authorization": f"Bearer {token}"}))
+async def http_kitchen(base: str, token: str | None, path: str = "/mcp") -> AsyncIterator[Kitchen]:
+    """Connect over HTTP; with token=None no Authorization header is sent (connectors that use a secret URL)."""
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    transport = streamable_http_client(f"{base}{path}", http_client=create_mcp_http_client(headers=headers))
     async with Client(transport) as client:
         yield Kitchen(client)
 

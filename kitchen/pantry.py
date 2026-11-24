@@ -6,8 +6,9 @@ import datetime as dt
 from typing import Any
 
 from .catalog import STORAGE_WORDS, norm
-from .core import KitchenBase, action, envelope
+from .core import action, envelope
 from .db import KitchenError, new_id, utc_now
+from .supplies import SupplyMixin
 from .units import fmt_qty, parse_item, to_base
 
 LOCATIONS = STORAGE_WORDS
@@ -16,7 +17,7 @@ STAPLE_LEVELS = {"voll": "full", "full": "full", "da": "full", "genug": "full", 
                  "knapp": "low", "leer": "empty", "empty": "empty", "alle": "empty", "aus": "empty"}
 
 
-class PantryMixin(KitchenBase):
+class PantryMixin(SupplyMixin):
     def location(self, value: str | None, ing: dict[str, Any] | None = None) -> str:
         if not value:
             return (ing or {}).get("storage") or "pantry"
@@ -56,6 +57,9 @@ class PantryMixin(KitchenBase):
     def add_lot(self, ing: dict[str, Any], qty: float, *, location: str | None = None, best_before: dt.date | None = None,
                 purchase_line_id: str | None = None, on: dt.date | None = None) -> dict[str, Any]:
         now, today = utc_now(), on or self.today()
+        if ing.get("is_supply"):
+            self.supply_refill(ing, qty, today)  # supplies are not lots: no best-before, just a restock rhythm
+            return {"id": None}
         location = location or ing.get("storage") or "pantry"
         estimated = best_before is None
         bb = best_before or self.estimated_best_before(ing, location, today)
@@ -156,6 +160,10 @@ class PantryMixin(KitchenBase):
             if expiring:
                 summary += f", {len(expiring)} laufen in ≤2 Tagen ab ({', '.join(i['name'] for i in expiring[:5])})"
             low = [s for s in staples if s["level"] != "full"]
+            household = self.supply_overview(query)
+            if household and not loc:
+                soon = [h["name"] for h in household if h["status"] in ("leer", "knapp", "bald nachkaufen")]
+                summary += f"; Haushalt: {len(household)} Artikel" + (f", bald nötig: {', '.join(soon[:5])}" if soon else "")
             next_actions = []
             if expiring:
                 next_actions.append(action("find_recipes", "Rezeptideen für bald Ablaufendes",
@@ -163,7 +171,7 @@ class PantryMixin(KitchenBase):
             if low:
                 next_actions.append(action("update_shopping_list", "Knappe Grundzutaten auf die Liste setzen",
                                            {"add": [s["name"] for s in low]}))
-            return envelope(summary, {"items": items, "staples": staples},
+            return envelope(summary, {"items": items, "staples": staples, "household": household if not loc else []},
                             warnings=[f"Abgelaufen: {', '.join(i['name'] for i in expired)}" if expired else None],
                             next_actions=next_actions,
                             display_hint="Nach Ablaufdatum, bald Ablaufendes hervorheben; bei geschätzten Daten 'ca.' davor")
@@ -182,6 +190,11 @@ class PantryMixin(KitchenBase):
                 amount = parse_item(raw["name"], raw.get("qty"), raw.get("unit"))
                 ing = self.catalog.resolve(amount.name, kind_hint=amount.kind, details=raw.get("details"))
                 seen.add(ing["id"])
+                if ing.get("is_supply"):
+                    lines += self._update_supply(ing, act, amount, raw, today)
+                    continue
+                if raw.get("lasts_days") is not None or raw.get("track") is not None:
+                    warnings.append(f"{ing['name']} ist ein Lebensmittel – Nachkauf-Rhythmus gilt nur für Haushaltsartikel.")
                 loc = self.location(raw.get("location"), ing) if raw.get("location") or act in ("add", "set", "move") else None
                 bb = self.parse_day(raw.get("best_before")) if raw.get("best_before") else None
                 if ing["is_staple"] or act == "level":
@@ -286,9 +299,32 @@ class PantryMixin(KitchenBase):
                                   (today.isoformat(), loc))
                 if gone:
                     lines.append(f"Inventur {LOCATION_LABEL[loc]}: {len(gone)} nicht genannte Posten auf 0 gesetzt")
-            return envelope("Vorrat aktualisiert: " + "; ".join(lines), {"changes": lines}, warnings=warnings,
-                            next_actions=[action("undo_last_action", "Falls etwas falsch verstanden wurde")])
+            added = self._sync_restock(create_trip=True)  # type: ignore[attr-defined]
+            if added:
+                lines.append("auf die Einkaufsliste: " + ", ".join(added))
+            return envelope("Vorrat aktualisiert: " + "; ".join(lines), {"changes": lines, "added_to_shopping_list": added},
+                            warnings=warnings, next_actions=[action("undo_last_action", "Falls etwas falsch verstanden wurde")])
         return self.command("update_pantry", args, run)
+
+    def _update_supply(self, ing: dict[str, Any], act: str, amount: Any, raw: dict[str, Any], today: dt.date) -> list[str]:
+        """Household supplies: bought/restocked, counted, running low/empty, or how long a pack lasts."""
+        lines = self.supply_settings(ing, lasts_days=raw.get("lasts_days"), track=raw.get("track"))
+        level = STAPLE_LEVELS.get(norm(raw.get("level") or ""))
+        packs = to_base(amount.value, amount.kind or "pc", ing)[0] if amount.value is not None else None
+        if act == "level" or level:
+            level = {"full": "ok", "low": "low", "empty": "empty"}[level or "full"]
+            self.supply_level(ing, level, today)
+            lines.append(f"{ing['name']}: {dict(ok='genug da', low='knapp', empty='leer')[level]}")
+        elif act == "add" and not lines:
+            self.supply_refill(ing, packs or 1, today)
+            lines.append(f"+ {self.qty_label(packs or 1, ing)} {ing['name']}")
+        elif act == "set":
+            self.supply_count(ing, packs if packs is not None else 1, today)
+            lines.append(f"{ing['name']} = {self.qty_label(packs or 0, ing)}" if packs else f"{ing['name']}: leer")
+        elif act in ("use", "discard"):
+            self.supply_level(ing, "empty", today)
+            lines.append(f"{ing['name']}: leer")
+        return lines or [f"{ing['name']}: unverändert"]
 
     def _set_total(self, ing: dict[str, Any], qty: float, loc: str | None, bb: dt.date | None) -> None:
         lots = [l for l in self.lots(ing["id"], include_staples=False) if not loc or l["location"] == loc]

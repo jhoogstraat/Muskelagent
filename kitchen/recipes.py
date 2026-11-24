@@ -98,6 +98,9 @@ class RecipeMixin(PantryMixin):
                     clarify.append({"input": raw["name"], "candidates": err.details["candidates"]})
                     continue
                 raise
+            if ing.get("is_supply"):
+                warnings.append(f"{ing['name']} ist kein Lebensmittel und wird nicht als Zutat gespeichert.")
+                continue
             if amount.value is None:
                 if ing["is_staple"]:
                     qty = 0.0

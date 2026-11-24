@@ -31,7 +31,8 @@ class Item(BaseModel):
     qty: float | None = Field(None, description="Menge, falls nicht im Namen")
     unit: str | None = Field(None, description="g, kg, ml, l, Stück, EL, TL, Packung, Dose, Becher …")
     details: dict[str, Any] | None = Field(None, description="Nur für neue, unbekannte Zutaten: allergens (Liste), animal "
-                                                             "(meat/fish/dairy/egg/null), category, kcal, protein_g, carbs_g, fat_g pro 100 g")
+                                                             "(meat/fish/dairy/egg/null), category, kcal, protein_g, carbs_g, fat_g pro 100 g. "
+                                                             "Unbekannter Haushaltsartikel (kein Lebensmittel): {non_food: true}")
 
 
 class PantryItem(Item):
@@ -40,7 +41,9 @@ class PantryItem(Item):
                            "(z. B. einfrieren), level=Füllstand Grundzutat")
     location: str | None = Field(None, description="Kühlschrank, Tiefkühler oder Vorrat; sonst üblicher Ort der Zutat")
     best_before: str | None = Field(None, description="MHD, z. B. '2026-12-03' oder '3.12.'; ohne Angabe schätzt der Server")
-    level: str | None = Field(None, description="Für Grundzutaten wie Salz, Öl: voll, knapp, leer")
+    level: str | None = Field(None, description="Für Grundzutaten (Salz, Öl) und Haushaltsartikel (Klopapier): voll, knapp, leer")
+    lasts_days: float | None = Field(None, description="Nur Haushaltsartikel: so viele Tage hält eine Packung bei uns")
+    track: bool | None = Field(None, description="Nur Haushaltsartikel: false = nicht mehr ans Nachkaufen erinnern")
 
 
 class BoughtItem(Item):
@@ -219,8 +222,9 @@ def build_server(kitchen: Kitchen) -> MCPServer:
         store: Annotated[str | None, Field(description="Laden, auf dessen Liste es soll")] = None,
         date: str | None = None,
     ) -> dict[str, Any]:
-        """Setzt Dinge auf die Einkaufsliste oder streicht sie: 'Setz Milch auf die Liste', 'Brot brauche ich nicht'.
-        Der Server sucht passende Angebote und Packungsgrößen. Nicht für geplante Gerichte (die kommen über plan_meals)."""
+        """Setzt Dinge auf die Einkaufsliste oder streicht sie: 'Setz Milch auf die Liste', 'Klopapier mit drauf',
+        'Brot brauche ich nicht'. Der Server sucht Angebote und Packungsgrößen und ergänzt bald nötige Haushaltsartikel
+        selbst. Streichen eines solchen Artikels heißt 'noch genug da'. Nicht für geplante Gerichte (plan_meals)."""
         return kitchen.update_shopping_list(_dump(add), remove, store, date)
 
     @mcp.tool(annotations=write)
@@ -234,7 +238,8 @@ def build_server(kitchen: Kitchen) -> MCPServer:
         total_eur: Annotated[float | None, Field(description="Summe laut Kassenbon")] = None,
     ) -> dict[str, Any]:
         """Bucht einen Einkauf: 'War einkaufen, alles außer Feta', 'Hähnchen 1,2 kg für 11,90 €', oder Positionen eines
-        Kassenbon-Fotos. Gleicht mit der Einkaufsliste ab, legt alles in den Vorrat (mit geschätztem MHD), speichert Preise.
+        Kassenbon-Fotos, auch Drogerie- und Haushaltsartikel. Gleicht mit der Einkaufsliste ab, legt alles in den Vorrat
+        (mit geschätztem MHD), speichert Preise.
         Fehlt etwas für geplante Gerichte, kommt eine Rückfrage (Ersatz, tauschen, ohne). Nicht für Dinge, die schon
         zu Hause waren (update_pantry)."""
         return kitchen.record_purchase({"rest_of_list_bought": rest_of_list_bought, "missing": missing, "bought": _dump(bought),
@@ -283,8 +288,9 @@ def build_server(kitchen: Kitchen) -> MCPServer:
         location: Annotated[str | None, Field(description="Kühlschrank, Tiefkühler oder Vorrat")] = None,
         expiring_within_days: Annotated[int | None, Field(description="Nur was in so vielen Tagen abläuft")] = None,
     ) -> dict[str, Any]:
-        """Zeigt den Vorrat, bald Ablaufendes zuerst, mit Lagerort, Reservierungen für geplante Gerichte und Resten.
-        Nutze dies bei 'Was haben wir noch?', 'Was läuft bald ab?', 'Haben wir Eier?'."""
+        """Zeigt den Vorrat, bald Ablaufendes zuerst, mit Lagerort, Reservierungen für geplante Gerichte und Resten,
+        dazu Haushaltsartikel mit geschätzter Reichweite. Nutze dies bei 'Was haben wir noch?', 'Was läuft bald ab?',
+        'Haben wir Eier?', 'Wie lange reicht das Klopapier?'."""
         return kitchen.get_pantry(query, location, expiring_within_days)
 
     @mcp.tool(annotations=write)
@@ -294,8 +300,9 @@ def build_server(kitchen: Kitchen) -> MCPServer:
         stocktake_location: Annotated[str | None, Field(description="Inventur: alles an diesem Ort, das nicht in items steht, ist aufgebraucht")] = None,
     ) -> dict[str, Any]:
         """Ändert den Vorrat ohne Einkauf oder Kochen: 'Wir haben noch 6 Eier' (set), 'Hab 200 g Käse gegessen' (use),
-        'Milch ist schlecht' (discard), 'Hähnchen eingefroren' (move nach Tiefkühler), 'Salz ist fast leer' (level),
-        oder eine Inventur. Einkäufe bitte mit record_purchase, Gekochtes mit record_cooking buchen."""
+        'Milch ist schlecht' (discard), 'Hähnchen eingefroren' (move nach Tiefkühler), 'Salz ist fast leer' oder
+        'Spülmittel ist alle' (level; kommt dann von selbst auf die Liste), 'Eine Packung Klopapier hält bei uns 3 Wochen'
+        (lasts_days). Einkäufe mit record_purchase, Gekochtes mit record_cooking buchen."""
         return kitchen.update_pantry(_dump(items), stocktake_location)
 
     @mcp.tool(annotations=read)
@@ -424,11 +431,21 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _require_token(app: Any, token: str) -> Any:
-    """Bearer-token gate for HTTP mode; /healthz stays open for uptime checks."""
+    """Secret gate for HTTP mode; /healthz stays open for uptime checks.
+
+    Clients that can send headers use `Authorization: Bearer <token>`. ChatGPT and claude.ai connectors only offer OAuth
+    or no authentication, so the same secret also works as a path prefix: https://host/<token>/mcp ("No authentication").
+    """
+    prefix = f"/{token}"
+
     async def gated(scope, receive, send):  # type: ignore[no-untyped-def]
         if scope["type"] == "http" and scope.get("path") != "/healthz":
+            path = scope.get("path") or ""
             headers = dict(scope.get("headers") or [])
-            if headers.get(b"authorization", b"").decode() != f"Bearer {token}":
+            if path == prefix or path.startswith(prefix + "/"):
+                inner = path[len(prefix):] or "/"
+                scope = dict(scope, path=inner, raw_path=inner.encode())
+            elif headers.get(b"authorization", b"").decode() != f"Bearer {token}":
                 await send({"type": "http.response.start", "status": 401, "headers": [(b"content-type", b"application/json")]})
                 await send({"type": "http.response.body", "body": b'{"error":"unauthorized"}'})
                 return

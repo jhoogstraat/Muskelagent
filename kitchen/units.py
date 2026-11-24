@@ -32,6 +32,9 @@ _alias("ml", 240, "tasse", "tassen", "cup", "cups")
 _alias("ml", 20, "schuss", "spritzer")
 _alias("pc", 1, "stück", "stueck", "stk", "st", "pc", "pcs", "piece", "pieces", "x", "zehe", "zehen",
        "scheibe", "scheiben", "knolle", "knollen", "kopf", "köpfe", "bund", "bündel", "stange", "stangen", "blatt", "blätter")
+# Words that describe what is inside one pack of a household supply ("8 Rollen", "40 Tabs", "20 WL"): one pack.
+_alias("content", 1, "rolle", "rollen", "tab", "tabs", "tabletten", "waschladung", "waschladungen", "wl", "beutelchen", "pads",
+       "kapseln", "pods")
 _alias("pack", 1, "packung", "packungen", "pck", "pckg", "pkg", "pack", "packs", "dose", "dosen", "becher",
        "glas", "gläser", "flasche", "flaschen", "beutel", "tüte", "tüten", "netz", "schale", "schalen", "tetrapak")
 
@@ -87,7 +90,7 @@ def parse_item(text: str, qty: float | None = None, unit: str | None = None) -> 
         trailing = None if match else TRAILING_RE.match(raw)
         if trailing and (trailing.group("unit") or "").rstrip(".").casefold() in UNIT_ALIASES | {"": None}:
             kind, factor = UNIT_ALIASES.get((trailing.group("unit") or "").rstrip(".").casefold(), ("pc", 1))
-            value = to_number(trailing.group("num")) * factor
+            value = 1.0 if kind == "content" else to_number(trailing.group("num")) * factor
             name = trailing.group("rest")
         if match:
             value = to_number(match.group("num"))
@@ -97,7 +100,7 @@ def parse_item(text: str, qty: float | None = None, unit: str | None = None) -> 
             rest = match.group("rest").strip()
             if unit_word in UNIT_ALIASES:
                 kind, factor = UNIT_ALIASES[unit_word]
-                value *= factor
+                value = 1.0 if kind == "content" else value * factor
                 name = rest
             else:
                 # "2 Zwiebeln": the "unit" is the first word of the name.
@@ -129,6 +132,11 @@ def to_base(value: float, kind: str, ing: dict[str, Any]) -> tuple[float, bool]:
     base = ing["base_unit"]
     gpp, density, pack = ing.get("g_per_piece"), ing.get("density_g_per_ml"), ing.get("pack_qty")
     approx = False
+    if ing.get("is_supply"):
+        # Supplies are counted in packs: "2 Packungen", "3 Klopapier"; a size ("750 ml Spülmittel", "8 Rollen") is one pack.
+        return (value, False) if kind in ("pc", "pack") else (max(1.0, value) if kind == "content" else 1.0, True)
+    if kind == "content":
+        return value * (pack or 1), True
     if kind == "pack":
         if not pack:
             raise KitchenError("unit_mismatch", f"Wie groß ist eine Packung {ing['name']}?",
@@ -186,6 +194,11 @@ def fmt_qty(qty: float, base_unit: str) -> str:
         return f"{_num(qty / 1000)} l"
     unit = {"g": "g", "ml": "ml", "pc": "Stück"}[base_unit]
     return f"{_num(qty)} {unit}"
+
+
+def fmt_packs(qty: float) -> str:
+    n = _num(qty)
+    return f"{n} Packung" if n == "1" else f"{n} Packungen"
 
 
 def _num(value: float) -> str:

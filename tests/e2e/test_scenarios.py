@@ -442,3 +442,120 @@ def test_plant_based_products_are_not_mistaken_for_dairy(db):
                 "60 g Haferflocken", {"name": "250 ml Haselnussmilch", "details": {"allergens": ["Nüsse"], "animal": None}}]})
             assert any("Haushaltsregeln" in w for w in fixed["warnings"]), fixed["warnings"]
     run(scenario())
+
+
+def test_secret_url_works_for_connectors_without_headers(db):
+    """ChatGPT/claude.ai connectors cannot send a bearer token; https://host/<token>/mcp with no auth must work."""
+    with http_server(db, token="s3cret") as base:
+        async def scenario():
+            async with http_kitchen(base, None, "/s3cret/mcp") as k:
+                assert (await k.call("get_kitchen_status"))["data"]["today"] == MONDAY
+        run(scenario())
+        for wrong in ("/wrong/mcp", "/s3cretX/mcp", "/mcp"):
+            request = urllib.request.Request(f"{base}{wrong}", data=b"{}", method="POST", headers={"content-type": "application/json"})
+            with pytest.raises(urllib.error.HTTPError) as denied:
+                urllib.request.urlopen(request)
+            assert denied.value.code == 401, wrong
+
+
+def _household(status_or_pantry):
+    return {h["name"]: h for h in status_or_pantry["data"]["household"]}
+
+
+def _list_lines(shopping):
+    return {line["name"]: line for trip in shopping["data"]["trips"] for lines in trip["sections"].values() for line in lines}
+
+
+def test_household_supplies_restock_themselves(db):
+    """Non-food: bought without questions, no best-before, learned rhythm, back on the list when due, 'still have it'."""
+    async def day_one():
+        async with kitchen(db, MONDAY) as k:
+            await k.call("manage_household", members=[{"name": "Josh"}, {"name": "Sam"}], stores=[{"name": "Lidl"}],
+                         restrictions=[{"kind": "intolerance", "value": "Laktose"}])
+            bought = await k.call("record_purchase", store="Lidl", bought=[
+                "Klopapier 8 Rollen", "Spülmittel", "Duschgel", {"name": "Spülmaschinentabs 40 Tabs", "price_eur": 4.99}])
+            assert bought["ask_user"] == [] and not any("Menge" in w for w in bought["warnings"]), bought
+            assert "1 Packung Toilettenpapier (nicht auf der Liste)" in bought["data"]["bought"]
+            pantry = await k.call("get_pantry")
+            assert pantry["data"]["items"] == []  # supplies are not food lots: nothing "expires"
+            household = _household(pantry)
+            assert set(household) == {"Toilettenpapier", "Spülmittel", "Duschgel", "Spülmaschinentabs"}
+            assert household["Toilettenpapier"]["status"].startswith("reicht noch")
+            assert set(_household(await k.call("get_pantry", query="Klopapier"))) == {"Toilettenpapier"}
+            recipe = await k.call("save_recipe", recipe={"name": "Ofengemüse", "servings": 2,
+                                                         "ingredients": ["500 g Kartoffeln", "1 Paprika", "Backpapier"]})
+            assert any("kein Lebensmittel" in w for w in recipe["warnings"])
+            assert (await k.call("get_kitchen_status"))["data"]["restock_due"] == []
+
+    async def four_weeks_later():
+        async with kitchen(db, "2026-08-22") as k:
+            status = await k.call("get_kitchen_status")
+            due = {r["name"] for r in status["data"]["restock_due"]}
+            assert {"Toilettenpapier", "Spülmittel", "Duschgel"} <= due and "Spülmaschinentabs" not in due
+            assert "nachkaufen" in status["summary"]
+            draft = await k.call("plan_meals", days=2, meals=[{"recipe": CURRY}, {"recipe": "Ofengemüse"}])
+            confirmed = await k.call("confirm_plan", proposal_id=draft["data"]["proposal_id"])
+            assert {"Toilettenpapier (prüfen)", "Spülmittel (prüfen)", "Duschgel (prüfen)"} <= set(confirmed["data"]["restock_added"])
+            emptied = await k.call("update_pantry", items=[{"name": "Zahnpasta", "action": "level", "level": "leer"}])
+            assert emptied["data"]["added_to_shopping_list"] == ["Zahnpasta"]
+            lines = _list_lines(await k.call("get_shopping_list"))
+            assert lines["Toilettenpapier"]["check_at_home"] and lines["Toilettenpapier"]["in_total"] is False
+            assert "zuletzt vor 4 Wochen" in lines["Toilettenpapier"]["why"]
+            assert not lines["Zahnpasta"]["check_at_home"] and lines["Zahnpasta"]["buy"] == "1 Packung"
+            await k.call("update_shopping_list", remove=["Duschgel"])  # "hab noch Duschgel"
+            assert "Duschgel" not in _list_lines(await k.call("get_shopping_list"))
+            purchase = await k.call("record_purchase", store="Lidl", rest_of_list_bought=True, bought=["Klopapier"])
+            assert purchase["data"]["still_at_home"] == ["Spülmittel"]
+            household = _household(await k.call("get_pantry"))
+            assert household["Toilettenpapier"]["interval_source"] == "gelernt"
+            assert household["Zahnpasta"]["status"].startswith("reicht noch")
+            assert household["Spülmittel"]["status"].startswith("reicht noch")  # asked again later, not now
+            assert household["Duschgel"]["status"].startswith("reicht noch")
+            assert (await k.call("get_kitchen_status"))["data"]["restock_due"] == []
+
+            await k.call("update_pantry", items=[{"name": "Klopapier", "lasts_days": 21}])
+            await k.call("update_pantry", items=[{"name": "Spülmaschinentabs", "track": False}])
+            household = _household(await k.call("get_pantry"))
+            assert household["Toilettenpapier"]["pack_lasts_days"] == 21 and household["Toilettenpapier"]["interval_source"] == "von dir"
+            assert household["Spülmaschinentabs"]["status"] == "wird nicht nachgekauft"
+            await k.call("undo_last_action")
+            assert _household(await k.call("get_pantry"))["Spülmaschinentabs"]["status"] != "wird nicht nachgekauft"
+
+            unknown = await k.call("update_shopping_list", add=[{"name": "Vogelfutter", "details": {"non_food": True}}])
+            assert unknown["ask_user"] == [] and "1 Packung Vogelfutter" in unknown["summary"]
+
+    run(day_one())
+    run(four_weeks_later())
+
+
+def test_database_from_the_previous_version_is_upgraded(db, tmp_path):
+    """A version-1 database (before supplies) keeps its data, gains supplies, and undo still covers changed tables."""
+    import sqlite3
+    sys.path.insert(0, str(ROOT))
+    from kitchen.db import SCHEMA, _install_change_triggers
+    conn = sqlite3.connect(db)
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    for table in ("ingredient", "shopping_item", "lot"):
+        _install_change_triggers(conn, table)
+    conn.execute("INSERT INTO household (id, created_at, updated_at) VALUES (1, 'x', 'x')")
+    conn.execute("INSERT INTO current_event (k, event_id) VALUES (1, NULL)")
+    conn.execute("INSERT INTO ingredient (id, name, base_unit, allergens, details_known, created_at, updated_at) "
+                 "VALUES ('ing_old', 'Klopapier', 'g', '[]', 0, 'x', 'x')")  # an earlier agent created it as 'food'
+    conn.execute("PRAGMA user_version = 1")
+    conn.commit()
+    conn.close()
+
+    async def scenario():
+        async with kitchen(db) as k:
+            await k.call("update_pantry", items=[{"name": "Klopapier", "action": "level", "level": "leer"}])
+            lines = _list_lines(await k.call("get_shopping_list"))
+            line = lines.get("Klopapier") or lines.get("Toilettenpapier")
+            assert line and line["buy"] == "1 Packung" and line["restock"], lines
+            await k.call("undo_last_action")
+            assert (await k.call("get_shopping_list"))["data"]["trips"] == []
+            assert (await k.call("get_pantry"))["data"]["household"] == []
+    run(scenario())
+    check = sqlite3.connect(db)
+    assert check.execute("PRAGMA user_version").fetchone()[0] == 2
+    assert check.execute("SELECT is_supply FROM ingredient WHERE id = 'ing_old'").fetchone()[0] == 1
