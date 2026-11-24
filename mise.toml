@@ -1,0 +1,65 @@
+[tools]
+"ubi:openai/tunnel-client" = "0.0.10"
+uv = "latest"
+
+[env]
+CONTROL_PLANE_TUNNEL_ID = "tunnel_6a6bbeaf707c819199018c4daff7a201"
+# Secret CONTROL_PLANE_API_KEY lives in mise.local.toml (untracked).
+TUNNEL_ALIAS = "supermarket-offers"
+# The server keeps its own offer cache and refreshes it daily; no offers file is needed any more.
+KITCHEN_COMMAND = "{{config_root}}/.venv/bin/python {{config_root}}/offer_mcp_server.py"
+
+[tasks.setup]
+description = "Install dependencies into .venv"
+run = "uv sync"
+
+[tasks.test]
+description = "End-to-end scenarios over MCP (stdio + HTTP) against the real server"
+run = "uv run pytest"
+
+[tasks."test:agent"]
+description = "Agent-in-the-loop e2e: Claude talks to the server from plain sentences (uses API credits)"
+run = "uv run python tests/agent/run_agent_e2e.py"
+
+[tasks."serve:http"]
+description = "Serve over Streamable HTTP on :8000 (set KITCHEN_TOKEN to require a bearer token)"
+run = "uv run python -m kitchen.server --transport http --host 0.0.0.0"
+
+[tasks."offers:refresh"]
+description = "Fetch today's Muskelmarkt offers into a JSON file (the server also does this by itself daily)"
+run = "uv run python muskelmarkt_extractor.py --output offers-$(date +%F).json"
+
+[tasks."tunnel:configure"]
+description = "Create/update the tunnel-client profile that exposes the Kitchen Agent MCP server"
+depends = ["setup"]
+run = '''
+set -e
+tunnel-client init \
+  --profile "$TUNNEL_ALIAS" \
+  --tunnel-id "$CONTROL_PLANE_TUNNEL_ID" \
+  --mcp-command "$KITCHEN_COMMAND" \
+  --control-plane-api-key-ref env:CONTROL_PLANE_API_KEY \
+  --force
+tunnel-client doctor --profile "$TUNNEL_ALIAS" --explain
+'''
+
+[tasks."tunnel:start"]
+description = "Start the tunnel as a managed background runtime"
+depends = ["setup"]
+run = '''
+set -e
+tunnel-client runtimes connect \
+  --alias "$TUNNEL_ALIAS" \
+  --profile "$TUNNEL_ALIAS" \
+  --tunnel-id "$CONTROL_PLANE_TUNNEL_ID" \
+  --mcp-command "$KITCHEN_COMMAND"
+tunnel-client runtimes status "$TUNNEL_ALIAS"
+'''
+
+[tasks."tunnel:stop"]
+description = "Stop the managed tunnel runtime"
+run = "tunnel-client runtimes stop \"$TUNNEL_ALIAS\""
+
+[tasks."tunnel:status"]
+description = "Show the tunnel runtime's process/health/ready status"
+run = "tunnel-client runtimes status \"$TUNNEL_ALIAS\" --json"

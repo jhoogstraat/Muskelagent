@@ -1,0 +1,29 @@
+# Raspberry Pi deployment: `docker compose up -d`. Put KITCHEN_TOKEN and TUNNEL_TOKEN in a .env file next to this one.
+services:
+  kitchen:
+    build: .
+    restart: unless-stopped
+    environment:
+      KITCHEN_TOKEN: ${KITCHEN_TOKEN:?set a long random token}
+    volumes:
+      - kitchen-data:/data
+    ports:
+      - "127.0.0.1:${KITCHEN_HOST_PORT:-8000}:8000"
+    # Defined here as well because Podman ignores HEALTHCHECK in OCI images.
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz')"]
+      interval: 60s
+      timeout: 5s
+
+  # Public HTTPS without opening a router port. Create the tunnel in the Cloudflare dashboard,
+  # route kitchen.<your-domain> to http://kitchen:8000 and paste its token into .env.
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN:-}
+    profiles: ["tunnel"]
+
+volumes:
+  kitchen-data:

@@ -1,0 +1,17 @@
+[project]
+name = "muskelagent"
+version = "2.0.0"
+description = "Kitchen Agent: MCP server for meal planning, pantry, shopping and supermarket offers"
+requires-python = ">=3.12"
+dependencies = ["mcp>=2.3"]
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests/e2e"]
+pythonpath = ["tests/e2e", "."]
+addopts = "-q"
