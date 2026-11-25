@@ -424,6 +424,8 @@ def main(argv: list[str] | None = None) -> int:
     import uvicorn
     app = server.streamable_http_app(host=args.host)
     token = os.environ.get("KITCHEN_TOKEN")
+    if os.environ.get("KITCHEN_TOKEN_FILE"):  # container secrets are mounted as files
+        token = Path(os.environ["KITCHEN_TOKEN_FILE"]).read_text().strip()
     if token:
         app = _require_token(app, token)
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")

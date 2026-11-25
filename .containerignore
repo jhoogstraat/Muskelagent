@@ -1,0 +1,10 @@
+.venv
+.git
+.pytest_cache
+tests
+docs
+**/__pycache__
+mise.local.toml
+.env*
+*.sqlite3*
+*offers-*.json
